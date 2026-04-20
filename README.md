@@ -1,11 +1,11 @@
-# GPRU: Prompt-based Recommendation Unlearning
+# Graph Prompt-based Recommendation Unlearning with Teacher--Student Contrastive Learning
 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-Research%20Prototype-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)
 ![PyG](https://img.shields.io/badge/PyG-Graph%20Recommendation-3C2179?style=flat-square)
 ![Task](https://img.shields.io/badge/Task-Recommendation%20Unlearning-111827?style=flat-square)
 
-GPRU 是论文 **Prompt-based Recommendation Unlearning** 的实验型实现。项目围绕推荐系统中的“被遗忘权”场景，提供一种轻量级的 **GPRU** 推荐遗忘流程：冻结已经训练好的推荐主干模型，仅训练少量 prompt 参数，在尽量保持保留数据推荐性能的同时，降低目标遗忘交互对模型输出的影响。
+GPRU 是论文 ** Graph Prompt-based Recommendation Unlearning with Teacher--Student Contrastive Learning** 的实验型实现。项目围绕推荐系统中的“被遗忘权”场景，提供一种轻量级的 **GPRU** 推荐遗忘流程：冻结已经训练好的推荐主干模型，仅训练少量 prompt 参数，在尽量保持保留数据推荐性能的同时，降低目标遗忘交互对模型输出的影响。
 
 本仓库同时保留了 SISA、重训练等对照实验入口，覆盖 **LightGCN / MF / BPRMF** 三类推荐模型，以及 **Amazon-Book / Gowalla / Yelp2018** 三个常用推荐基准数据集。
 
@@ -256,10 +256,3 @@ jupyter notebook
 - 不同系统对路径大小写敏感，使用 Gowalla / Yelp2018 时请保持 notebook 中的 dataset path 与本地目录一致。
 - 大规模数据集上评估会构造 user-item score matrix，显存不足时请调小 `batch_size`。
 
-## Reference
-
-本实现主要参考仓库内论文：
-
-```text
-_iconip__Prompt_based_Recommendation_Unlearning.pdf
-```
