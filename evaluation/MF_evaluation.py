@@ -2,11 +2,11 @@ import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import degree
 from prompt import *
-from util.LightGCN import *
+from util.utils import *
 from time import time
 
 
-def MF_based_eva(model, config: dict, data, device='cpu'):
+def MF_evaluation(model, config: dict, data, device='cpu'):
     data = data.to(device)  
     epochs = config['epochs']
     learning_rate = config['learning_rate']
@@ -69,9 +69,6 @@ def MF_based_eva(model, config: dict, data, device='cpu'):
                 isin_mat = ground_truth.gather(1, topk_index)
                 precision += float((isin_mat.sum(dim=-1) / config['k']).sum())
                 recall += float((isin_mat.sum(dim=-1) / node_count.clamp(1e-6)).sum())
-                # for i in range(isin_mat.shape[0]):
-                #     if node_count[i] > 0:
-                #         ndcg += ndcg_at_k(isin_mat[i].float(), config['k'])
                 for i in range(logits.shape[0]):
                     if node_count[i] > 0:
                         ndcg += ndcg_at_k(logits[i], ground_truth[i], config['k'])
@@ -86,10 +83,10 @@ def MF_based_eva(model, config: dict, data, device='cpu'):
               f"Recall@{config['k']}: {recall:.4f}, NDCG@{config['k']}: {ndcg:.4f}")
     end_time = time()
     print(f"Total time: {end_time - start_time:.2f}s")
-    return model, recall, ndcg
+    return model
 
 
-def prompt_MF_unlearning_eva(teacher, student, config: dict, retain_data, forget_data, device='cpu'):
+def prompt_MF_evaluation(teacher, student, config: dict, retain_data, forget_data, device='cpu'):
     retain_data = retain_data.to(device)  # Convert to homogeneous graph, dtype is Data
     epochs = config['epochs']
     learning_rate = config['learning_rate']
@@ -114,20 +111,21 @@ def prompt_MF_unlearning_eva(teacher, student, config: dict, retain_data, forget
         batch_size=config['batch_size'],
     )
 
-    if config['tuning_type'] == 'gpf':
+    if config['tuning_type'] == 'simplePrompt':
         prompt = SimplePrompt(config["embedding_dim"]).to(device)
-        optimizer = torch.optim.Adam(prompt.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    elif config['tuning_type'] == 'gpf-plus':
-        prompt = GPFplusAtt(config["embedding_dim"], config["number_p"]).to(device)
-        optimizer = torch.optim.Adam(prompt.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    elif config['tuning_type'] == 'complexPrompt':
+        prompt = ComplexPrompt(config["embedding_dim"], config["number_p"]).to(device)
     else:
         raise ValueError("Invalid tuning type")
+
+    teacher.eval()  # Teacher should always be in eval mode
+    student.train()  
+    optimizer = torch.optim.Adam(prompt.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     contrastive_loss = ContrastiveLoss(margin=1.0).to(device)
     start_time = time()
     for epoch in range(epochs):
-        teacher.eval()
-        student.train()
+        prompt.train()  # Prompt needs to be in train mode as well
         total_loss = total_examples = 0
         # Training on forget data
         for (retain_index, forget_index) in zip(retain_loader, forget_loader):
@@ -142,46 +140,29 @@ def prompt_MF_unlearning_eva(teacher, student, config: dict, retain_data, forget
             forget_dst = forget_dst - config['num_users']
 
             optimizer.zero_grad()
+            # Get teacher outputs without gradients
             with torch.no_grad():
                 teacher_retain_output = teacher(retain_src, retain_dst)
-            student_retain_output = student(retain_src, retain_dst, prompt=prompt).to(torch.float64)
-            retain_loss = compute_retain_loss(student_retain_output, teacher_retain_output).to(torch.float64)
+                teacher_forget_output = teacher(forget_src, forget_dst)
+            
+            # Get student outputs with gradients
+            student_retain_output = student(retain_src, retain_dst, prompt=prompt)
+            student_forget_output = student(forget_src, forget_dst, prompt=prompt)
+            
+            # Ensure outputs are treated as logits
+            retain_loss = compute_retain_loss(student_retain_output.float(), teacher_retain_output.float())
+            forget_loss = compute_forget_loss(student_forget_output.float(), teacher_forget_output.float())
 
-            with torch.no_grad():
-                teacher_forget_output = teacher(forget_src, forget_dst).to(torch.float64)
-            student_forget_output = student(forget_src, forget_dst, prompt=prompt).to(torch.float64)
-            forget_loss = compute_forget_loss(student_forget_output, teacher_forget_output)
-
-            if config['Contrastive_loss'] is True and config['regularization'] is True:
+            if config['Contrastive_loss'] is True:
                 # Contrastive loss
                 negative_labels = torch.zeros(student_forget_output.size(0), device=device)
                 contrastive_loss_forget = contrastive_loss(student_forget_output, teacher_forget_output,
                                                            negative_labels)
-                # Total loss
-                params = torch.cat([x.view(-1) for x in prompt.parameters()])
-                prompt_L2 = torch.norm(params, p=2)
+                positive_labels = torch.ones(student_forget_output.size(0), device=device)
+                contrastive_loss_retain = contrastive_loss(student_forget_output, teacher_forget_output,
+                                                           positive_labels)
                 loss = (config['alpha'] * retain_loss + config['beta'] * forget_loss +
-                        config['gamma'] * contrastive_loss_forget + config['delta'] * prompt_L2)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item() * (forget_edge_index.size(1) + retain_edge_index.size(1))
-                total_examples += forget_edge_index.size(1) + retain_edge_index.size(1)
-            elif config['Contrastive_loss'] is True and config['regularization'] is False:
-                # Contrastive loss
-                negative_labels = torch.zeros(student_forget_output.size(0), device=device)
-                contrastive_loss_forget = contrastive_loss(student_forget_output, teacher_forget_output,
-                                                           negative_labels)
-                loss = (config['alpha'] * retain_loss + config['beta'] * forget_loss +
-                        config['gamma'] * contrastive_loss_forget)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item() * (forget_edge_index.size(1) + retain_edge_index.size(1))
-                total_examples += forget_edge_index.size(1) + retain_edge_index.size(1)
-            elif config['Contrastive_loss'] is False and config['regularization'] is True:
-                # Total loss
-                params = torch.cat([x.view(-1) for x in prompt.parameters()])
-                prompt_L2 = torch.norm(params, p=2)
-                loss = (config['alpha'] * retain_loss + config['beta'] * forget_loss + config['delta'] * prompt_L2)
+                        config['gamma'] * (contrastive_loss_forget+contrastive_loss_retain))
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item() * (forget_edge_index.size(1) + retain_edge_index.size(1))
@@ -225,9 +206,6 @@ def prompt_MF_unlearning_eva(teacher, student, config: dict, retain_data, forget
                 isin_mat = ground_truth.gather(1, topk_index)
                 precision += float((isin_mat.sum(dim=-1) / config['k']).sum())
                 recall += float((isin_mat.sum(dim=-1) / node_count.clamp(1e-6)).sum())
-                # for i in range(isin_mat.shape[0]):
-                #     if node_count[i] > 0:
-                #         ndcg += ndcg_at_k(isin_mat[i].float(), config['k'])
                 for i in range(logits.shape[0]):
                     if node_count[i] > 0:
                         ndcg += ndcg_at_k(logits[i], ground_truth[i], config['k'])
@@ -245,9 +223,12 @@ def prompt_MF_unlearning_eva(teacher, student, config: dict, retain_data, forget
     return student, prompt
 
 
-def MF_forget_data_eva(student, prompt, forget_data, num_users, k, batch_size, device='cpu'):
+def MF_unlearning_evaluation(student, prompt, forget_data, config, device='cpu'):
     student.eval()
     forget_data = forget_data.to(device)
+    num_users = config['num_users']
+    k = config['k']
+    batch_size = config['batch_size']
 
     with torch.no_grad():
         user_emb, book_emb = student.get_embedding(prompt=prompt)
@@ -271,9 +252,6 @@ def MF_forget_data_eva(student, prompt, forget_data, num_users, k, batch_size, d
             precision += float((isin_mat.sum(dim=-1) / k).sum())
             recall += float((isin_mat.sum(dim=-1) / node_count.clamp(1e-6)).sum())
             total_examples += int((node_count > 0).sum())
-            # for i in range(isin_mat.shape[0]):
-            #         if node_count[i] > 0:
-            #             ndcg += ndcg_at_k(isin_mat[i].float(), k)
             for i in range(logits.shape[0]):
                     if node_count[i] > 0:
                         ndcg += ndcg_at_k(logits[i], ground_truth[i], k)

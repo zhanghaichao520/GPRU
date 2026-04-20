@@ -1,6 +1,6 @@
 from torch_geometric.data import Data
 from prompt import *
-from util.LightGCN import *
+from util.utils import *
 from torch_geometric.utils import degree
 from model.LightGCN import *
 from time import time
@@ -95,9 +95,6 @@ def BPRMF_eva(model, config: dict, data, device='cpu'):
                 precision += float((isin_mat.sum(dim=-1) / k).sum())
                 recall += float((isin_mat.sum(dim=-1) / node_count.clamp(1e-6)).sum())
 
-                # for i in range(isin_mat.shape[0]):
-                #     if node_count[i] > 0:
-                #         ndcg += ndcg_at_k(isin_mat[i].float(), k)
                 for i in range(logits.shape[0]):
                     if node_count[i] > 0:
                         ndcg += ndcg_at_k(logits[i], ground_truth[i], k)

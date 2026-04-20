@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Optional
-from util.LightGCN import recommendation_loss, recommend
+from util.utils import recommendation_loss, recommend
 
 class BPRMF(nn.Module):
     def __init__(

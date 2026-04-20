@@ -18,9 +18,9 @@ class SimplePrompt(nn.Module):
         return x + self.global_emb
 
 
-class GPFplusAtt(nn.Module):
+class ComplexPrompt(nn.Module):
     def __init__(self, in_channels: int, p_num: int):
-        super(GPFplusAtt, self).__init__()
+        super(ComplexPrompt, self).__init__()
         self.p_list = nn.Parameter(torch.Tensor(p_num, in_channels))
         self.a = nn.Linear(in_channels, p_num)
         self.reset_parameters()

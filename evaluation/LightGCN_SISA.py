@@ -2,7 +2,7 @@ import torch
 from time import time
 from torch_geometric.utils import degree
 from model.LightGCN import *
-from util.LightGCN import recommendation_loss, ndcg_at_k
+from util.utils import recommendation_loss, ndcg_at_k
 
 
 # LightGCN
@@ -88,9 +88,6 @@ def sisa_lightgcn_eva(shard_models, config: dict, data, device='cpu'):
                 isin_mat = ground_truth.gather(1, topk_index)
                 precision += float((isin_mat.sum(dim=-1) / k).sum())
                 recall += float((isin_mat.sum(dim=-1) / node_count.clamp(1e-6)).sum())
-                # for i in range(isin_mat.shape[0]):
-                #     if node_count[i] > 0:
-                #         ndcg += ndcg_at_k(isin_mat[i].float(), k)
                 for i in range(logits.shape[0]):
                     if node_count[i] > 0:
                         ndcg += ndcg_at_k(logits[i], ground_truth[i], k)
@@ -206,9 +203,6 @@ def sisa_lightgcn_unlearning_eva(shard_models, shards, retain_data, forget_data,
             precision += float((isin_mat.sum(dim=-1) / k).sum())
             recall += float((isin_mat.sum(dim=-1) / node_count.clamp(1e-6)).sum())
             total_examples += int((node_count > 0).sum())
-            # for i in range(isin_mat.shape[0]):
-            #         if node_count[i] > 0:
-            #             ndcg += ndcg_at_k(isin_mat[i].float(), k)
             for i in range(logits.shape[0]):
                     if node_count[i] > 0:
                         ndcg += ndcg_at_k(logits[i], ground_truth[i], k)
@@ -261,9 +255,6 @@ def sisa_lightgcn_forget_data_eva(shard_models, forget_data, config, device='cpu
             precision += float((isin_mat.sum(dim=-1) / k).sum())
             recall += float((isin_mat.sum(dim=-1) / node_count.clamp(1e-6)).sum())
             total_examples += int((node_count > 0).sum())
-            # for i in range(isin_mat.shape[0]):
-            #         if node_count[i] > 0:
-            #             ndcg += ndcg_at_k(isin_mat[i].float(), k)
             for i in range(logits.shape[0]):
                     if node_count[i] > 0:
                         ndcg += ndcg_at_k(logits[i], ground_truth[i], k)

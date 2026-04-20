@@ -1,33 +1,31 @@
 from torch_geometric.data import Data
 from prompt import *
-from util.LightGCN import *
+from util.utils import *
 from torch_geometric.utils import degree
 from model.LightGCN import *
 from time import time
 
 
-def lightgcn_eva(model, config: dict, data, device='cpu'):
+# Normal lightgcn evaluation method (without prompt or teacher student framework)
+def lightgcn_evaluation(model, config: dict, data, device='cpu'):
     # Preprocess the data
     num_users = config['num_users']
     num_books = config['num_books']
     k = config['k']
     epochs = config['epochs']
-    data = data.to(device)  # Convert to homogeneous graph, dtype is Data
-    epoch_tracks = []
     test_topks = []
     batch_size = config['batch_size']
     start_time = time()
-
-    mask = data.edge_index[0] < data.edge_index[1]
+    data = data.to(device)  # numedge 2380730
+    mask = data.edge_index[0] < data.edge_index[1]  
     train_edge_label_index = data.edge_index[:, mask]
     train_loader = torch.utils.data.DataLoader(
         range(train_edge_label_index.size(1)),
         shuffle=True,
         batch_size=batch_size,
     )
+    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])
 
-    prompt = None
-    optimizer = torch.optim.Adam(model.parameters(), lr=config["lr"])  # optimizer without weight decay
     for epoch in range(epochs):
         model.train()
         total_loss = total_examples = 0
@@ -45,11 +43,11 @@ def lightgcn_eva(model, config: dict, data, device='cpu'):
             ], dim=1)
 
             optimizer.zero_grad()
-            pos_rank, neg_rank = model(data.edge_index, edge_label_index, prompt=prompt).chunk(2)
+            pos_rank, neg_rank = model(data.edge_index, edge_label_index, prompt=None).chunk(2)
 
             loss = recommendation_loss(
                 model,
-                prompt,
+                None,
                 pos_rank,
                 neg_rank,
                 node_id=edge_label_index.unique(),
@@ -64,8 +62,7 @@ def lightgcn_eva(model, config: dict, data, device='cpu'):
         # Test
         model.eval()
         with torch.no_grad():
-            epoch_tracks.append(epoch)
-            emb = model.get_embedding(data.edge_index, prompt=prompt)
+            emb = model.get_embedding(data.edge_index, prompt=None)  # Here get the embedding of nodes
             user_emb, book_emb = emb[:num_users], emb[num_users:]
 
             precision = recall = total_examples = ndcg = 0
@@ -87,7 +84,7 @@ def lightgcn_eva(model, config: dict, data, device='cpu'):
                 ground_truth[data.edge_label_index[0, mask] - start,
                              data.edge_label_index[1, mask] - num_users] = True
                 node_count = degree(data.edge_label_index[0, mask] - start,
-                                    num_nodes=logits.size(0))
+                                    num_nodes=logits.size(0))  # Number of positive labels
 
                 topk_index = logits.topk(k, dim=-1).indices
                 isin_mat = ground_truth.gather(1, topk_index)
@@ -95,9 +92,6 @@ def lightgcn_eva(model, config: dict, data, device='cpu'):
                 precision += float((isin_mat.sum(dim=-1) / k).sum())
                 recall += float((isin_mat.sum(dim=-1) / node_count.clamp(1e-6)).sum())
 
-                # for i in range(isin_mat.shape[0]):
-                #     if node_count[i] > 0:
-                #         ndcg += ndcg_at_k(isin_mat[i].float(), k)
                 for i in range(logits.shape[0]):
                     if node_count[i] > 0:
                         ndcg += ndcg_at_k(logits[i], ground_truth[i], k)
@@ -108,28 +102,30 @@ def lightgcn_eva(model, config: dict, data, device='cpu'):
             recall = recall / total_examples
             ndcg = ndcg / total_examples
             test_topks.append((precision, recall, ndcg))
-            print(f'Epoch: {epoch + 1:03d}, Loss: {loss:.4f}, Precision@{k}: '
+            print(f'Epoch: {epoch + 1:03d}, Loss: {loss:.4f}, HR@{k}: '
                   f'{precision:.4f}, Recall@{k}: {recall:.4f}, NDCG@{k}: {ndcg:.4f}')
     end_time = time()
     print(f'Total time: {end_time - start_time:.2f}s')
-    return model, epoch_tracks, test_topks
+    return model
 
 
-def prompt_lightgcn_unlearning_eva(teacher, student, retain_data, forget_data, config: dict, device='cpu'):
+# Prompt lightgcn evaluation method
+def prompt_lightgcn_evaluation(teacher, student, whole_data, retain_data, forget_data, config: dict, device='cpu'):
     # Preprocess the data
     num_users = config['num_users']
     num_books = config['num_books']
     k = config['k']
     epochs = config['epochs']
     retain_data = retain_data.to(device)
+    whole_data = whole_data.to(device)
 
     # Resize the forget data
     forget_sample_size = retain_data.edge_index.size(1)
-    forget_indices = torch.randperm(forget_data.edge_index.size(1))[:forget_sample_size]
+    repeat_times = (forget_sample_size + forget_data.edge_index.size(1) - 1) // forget_data.edge_index.size(1)
+    forget_indices = torch.randperm(forget_data.edge_index.size(1)).repeat(repeat_times)[:forget_sample_size]
     forget_sampled = forget_data.edge_index[:, forget_indices]
-    forget_data = Data(x=num_users + num_books, edge_index=forget_sampled, edge_label_index=forget_sampled)
+    forget_data = Data(x=num_users + num_books, edge_index=forget_sampled, edge_label_index=[[]])
     forget_data = forget_data.to(device)
-    epoch_tracks = []
     test_topks = []
     batch_size = config['batch_size']
 
@@ -145,72 +141,57 @@ def prompt_lightgcn_unlearning_eva(teacher, student, retain_data, forget_data, c
         batch_size=batch_size,
     )
 
-    if config['tuning_type'] == 'gpf':
+    # Initialize the prompt and optimizer
+    # We only train the prompt parameters, not the student model parameters
+    if config['tuning_type'] == 'simplePrompt':
         prompt = SimplePrompt(config["embedding_dim"]).to(device)
-        optimizer = torch.optim.Adam(prompt.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
-    elif config['tuning_type'] == 'gpf-plus':
-        prompt = GPFplusAtt(config["embedding_dim"], config["number_p"]).to(device)
-        optimizer = torch.optim.Adam(prompt.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
+    elif config['tuning_type'] == 'complexPrompt':
+        prompt = ComplexPrompt(config["embedding_dim"], config["number_p"]).to(device)
     else:
-        raise AssertionError("Invalid tuning type")
-
+        raise AssertionError("Invalid tuning type, please choose between 'simplePrompt' and 'complexPrompt'.")
+    
+    # Set student and teacher models to eval mode since we don't use any optim tech like droupout
+    student.eval()
+    teacher.eval()
+    # Only optimize prompt parameters
+    optimizer = torch.optim.AdamW(prompt.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
     contrastive_loss = ContrastiveLoss(margin=1.0).to(device)
     start_time = time()
     for epoch in range(epochs):
-        student.train()
-        teacher.eval()
+        # Keep student and teacher in eval mode, only prompt in train mode
+        prompt.train()
         total_loss = total_examples = 0
 
-        # Training on forget data
         for (retain_index, forget_index) in zip(retain_loader, forget_loader):
             retain_edge_index = retain_data.edge_index[:, retain_index]
             forget_edge_index = forget_data.edge_index[:, forget_index]
             optimizer.zero_grad()
-
             with torch.no_grad():
-                teacher_retain_output = teacher(retain_data.edge_index, retain_edge_index)
-            student_retain_output = student(retain_data.edge_index, retain_edge_index, prompt=prompt)
+                teacher_retain_output = teacher(whole_data.edge_index, retain_edge_index)
+            student_retain_output = student(whole_data.edge_index, retain_edge_index, prompt=prompt)
             retain_loss = compute_retain_loss(student_retain_output, teacher_retain_output)
 
             with torch.no_grad():
-                teacher_forget_output = teacher(retain_data.edge_index, forget_edge_index)
-            student_forget_output = student(retain_data.edge_index, forget_edge_index, prompt=prompt)
+                teacher_forget_output = teacher(whole_data.edge_index, forget_edge_index)
+            student_forget_output = student(whole_data.edge_index, forget_edge_index, prompt=prompt)
             forget_loss = compute_forget_loss(student_forget_output, teacher_forget_output)
 
-            if config['Contrastive_loss'] is True and config['regularization'] is True:
+            if config['Contrastive_loss'] is True:
                 # Contrastive loss
-                negative_labels = torch.zeros(student_forget_output.size(0), device=device)
+                negative_labels = torch.zeros(student_forget_output.size(0), device=device)  # need to fix
                 contrastive_loss_forget = contrastive_loss(student_forget_output, teacher_forget_output,
                                                            negative_labels)
-                # Total loss
-                params = torch.cat([x.view(-1) for x in prompt.parameters()])
-                prompt_L2 = torch.norm(params, p=2)
+                
+                positive_labels = torch.ones(student_retain_output.size(0), device=device)  # need to fix
+                contrastive_loss_retain = contrastive_loss(student_retain_output, teacher_retain_output,
+                                                           positive_labels)
                 loss = (config['alpha'] * retain_loss + config['beta'] * forget_loss +
-                        config['gamma'] * contrastive_loss_forget + config['delta'] * prompt_L2)
+                        config['gamma'] * (contrastive_loss_forget+contrastive_loss_retain))
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item() * (forget_edge_index.size(1) + retain_edge_index.size(1))
                 total_examples += forget_edge_index.size(1) + retain_edge_index.size(1)
-            elif config['Contrastive_loss'] is True and config['regularization'] is False:
-                # Contrastive loss
-                negative_labels = torch.zeros(student_forget_output.size(0), device=device)
-                contrastive_loss_forget = contrastive_loss(student_forget_output, teacher_forget_output,
-                                                           negative_labels)
-                loss = (config['alpha'] * retain_loss + config['beta'] * forget_loss +
-                        config['gamma'] * contrastive_loss_forget)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item() * (forget_edge_index.size(1) + retain_edge_index.size(1))
-                total_examples += forget_edge_index.size(1) + retain_edge_index.size(1)
-            elif config['Contrastive_loss'] is False and config['regularization'] is True:
-                # Total loss
-                params = torch.cat([x.view(-1) for x in prompt.parameters()])
-                prompt_L2 = torch.norm(params, p=2)
-                loss = (config['alpha'] * retain_loss + config['beta'] * forget_loss + config['delta'] * prompt_L2)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item() * (forget_edge_index.size(1) + retain_edge_index.size(1))
-                total_examples += forget_edge_index.size(1) + retain_edge_index.size(1)
+
             else:
                 loss = (config['alpha'] * retain_loss + config['beta'] * forget_loss)
                 loss.backward()
@@ -220,11 +201,10 @@ def prompt_lightgcn_unlearning_eva(teacher, student, retain_data, forget_data, c
         loss = total_loss / total_examples
 
         # Evaluation
-        student.eval()
-        teacher.eval()
+        # student already in eval mode
+        prompt.eval()
         with torch.no_grad():
-            epoch_tracks.append(epoch)
-            emb = student.get_embedding(retain_data.edge_index, prompt=prompt)
+            emb = student.get_embedding(whole_data.edge_index, prompt=prompt)
             user_emb, book_emb = emb[:num_users], emb[num_users:]
             precision = recall = total_examples = ndcg = 0
             for start in range(0, num_users, batch_size):
@@ -248,9 +228,6 @@ def prompt_lightgcn_unlearning_eva(teacher, student, retain_data, forget_data, c
                 precision += float((isin_mat.sum(dim=-1) / k).sum())
                 recall += float((isin_mat.sum(dim=-1) / node_count.clamp(1e-6)).sum())
                 total_examples += int((node_count > 0).sum())
-                # for i in range(isin_mat.shape[0]):
-                #     if node_count[i] > 0:
-                #         ndcg += ndcg_at_k(isin_mat[i].float(), k)
                 for i in range(logits.shape[0]):
                     if node_count[i] > 0:
                         ndcg += ndcg_at_k(logits[i], ground_truth[i], k)
@@ -262,15 +239,20 @@ def prompt_lightgcn_unlearning_eva(teacher, student, retain_data, forget_data, c
                   f'{precision:.4f}, Recall@{k}: {recall:.4f}, NDCG@{k}: {ndcg:.4f}')
     end_time = time()
     print(f'Total time: {end_time - start_time:.2f}s')
-    return student, prompt, epoch_tracks, test_topks
+    return student, prompt
 
 
-def lightgcn_forget_data_eva(student, prompt, forget_data, num_users, k, batch_size, device='cpu'):
+def prompt_lightgcn_unlearning_evaluation(student, prompt, whole_data, forget_data, config, device='cpu'):
     student.eval()
+    prompt.eval()
     forget_data = forget_data.to(device)
+    whole_data = whole_data.to(device)
+    num_users = config['num_users']
+    k = config['k']
+    batch_size = config['batch_size']
 
     with torch.no_grad():
-        emb = student.get_embedding(forget_data.edge_index, prompt=prompt)
+        emb = student.get_embedding(whole_data.edge_index, prompt=prompt)
         user_emb, book_emb = emb[:num_users], emb[num_users:]
         precision = recall = total_examples = ndcg = 0
         for start in range(0, num_users, batch_size):
@@ -292,12 +274,9 @@ def lightgcn_forget_data_eva(student, prompt, forget_data, num_users, k, batch_s
             precision += float((isin_mat.sum(dim=-1) / k).sum())
             recall += float((isin_mat.sum(dim=-1) / node_count.clamp(1e-6)).sum())
             total_examples += int((node_count > 0).sum())
-            # for i in range(isin_mat.shape[0]):
-            #         if node_count[i] > 0:
-            #             ndcg += ndcg_at_k(isin_mat[i].float(), k)
             for i in range(logits.shape[0]):
-                    if node_count[i] > 0:
-                        ndcg += ndcg_at_k(logits[i], ground_truth[i], k)
+                if node_count[i] > 0:
+                    ndcg += ndcg_at_k(logits[i], ground_truth[i], k)
         precision = precision / total_examples
         recall = recall / total_examples
         ndcg = ndcg / total_examples

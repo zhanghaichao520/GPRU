@@ -2,7 +2,7 @@ import torch
 from time import time
 from torch_geometric.utils import degree
 from model.BPRMF import *
-from util.LightGCN import recommendation_loss, ndcg_at_k
+from util.utils import recommendation_loss, ndcg_at_k
 
 
 def sisa_BPRMF_eva(shard_models, config: dict, data, device='cpu'):
